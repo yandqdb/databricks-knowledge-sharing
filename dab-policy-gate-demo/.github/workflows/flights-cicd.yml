@@ -1,0 +1,135 @@
+name: Flights CI/CD (policy-gated)
+
+# Demonstrates a deploy gate: PR runs `databricks bundle validate` + a
+# `conftest` policy check against the Rego policy in /policy. On merge to
+# `dev`, the same checks run again and then the bundle is deployed to the
+# `test_automated` target.
+#
+# Note: unit tests / dependency install are intentionally omitted to keep
+# the demo focused on the policy-gate flow.
+
+concurrency: 1
+
+on:
+  workflow_dispatch:
+
+  pull_request:
+    types:
+      - opened
+      - synchronize
+    branches:
+      - dev
+
+  push:
+    branches:
+      - dev
+
+permissions:
+  contents: read
+
+env:
+  BUNDLE_TARGET: test_automated
+  CONFTEST_VERSION: "0.56.0"
+
+jobs:
+  validate:
+    name: "Validate bundle and run policy gate"
+    runs-on: ubuntu-latest
+    environment: test
+    defaults:
+      run:
+        working-directory: ./flights/flights-advanced
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Databricks CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/e0f69d54c90e95ccad22d5ff17751da665e599a9/install.sh -o /tmp/install-databricks-cli.sh
+          echo "6381c8d9c030787c4747010899eaa70b481aaba8acf6aee7785a63643bdb8f67  /tmp/install-databricks-cli.sh" | sha256sum -c -
+          sh /tmp/install-databricks-cli.sh
+
+      - name: Inject CI tag (team=test) into bundle
+        run: |
+          set -euo pipefail
+          yq -i '.presets.tags.team = "test"' databricks.yml
+          echo "--- presets after injection ---"
+          yq '.presets' databricks.yml
+
+      - name: Validate bundle schema
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_AUTH_TYPE: oauth-m2m
+        run: databricks bundle validate --target ${{ env.BUNDLE_TARGET }}
+
+      - name: Install Conftest
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+          sudo mv /tmp/conftest /usr/local/bin/conftest
+          conftest --version
+
+      - name: Policy gate (conftest against /policy)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_AUTH_TYPE: oauth-m2m
+        run: |
+          set -euo pipefail
+          databricks bundle validate --target ${{ env.BUNDLE_TARGET }} --output json > /tmp/bundle.json
+          conftest test \
+            --policy "$GITHUB_WORKSPACE/policy" \
+            --data "$GITHUB_WORKSPACE/policy/config.yaml" \
+            /tmp/bundle.json
+
+  deploy:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    name: "Deploy to test_automated"
+    runs-on: ubuntu-latest
+    environment: test
+    defaults:
+      run:
+        working-directory: ./flights/flights-advanced
+
+    needs:
+      - validate
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Databricks CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/e0f69d54c90e95ccad22d5ff17751da665e599a9/install.sh -o /tmp/install-databricks-cli.sh
+          echo "6381c8d9c030787c4747010899eaa70b481aaba8acf6aee7785a63643bdb8f67  /tmp/install-databricks-cli.sh" | sha256sum -c -
+          sh /tmp/install-databricks-cli.sh
+
+      - name: Inject CI tag (team=test) into bundle
+        run: |
+          set -euo pipefail
+          yq -i '.presets.tags.team = "test"' databricks.yml
+          echo "--- presets after injection ---"
+          yq '.presets' databricks.yml
+
+      - name: Deploy bundle
+        run: databricks bundle deploy --auto-approve --target ${{ env.BUNDLE_TARGET }}
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_AUTH_TYPE: oauth-m2m
+
+      - name: Run notebook validation
+        shell: bash
+        run: |
+          set -o pipefail
+          databricks bundle run notebook_validation_job --target ${{ env.BUNDLE_TARGET }} --refresh-all 2>&1 | tee output.log
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_AUTH_TYPE: oauth-m2m

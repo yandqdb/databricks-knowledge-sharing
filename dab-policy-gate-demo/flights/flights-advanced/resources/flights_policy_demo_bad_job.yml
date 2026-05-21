@@ -1,0 +1,21 @@
+# Intentionally violates the policy gate defined in /policy/databricks_bundle.rego.
+# The job name `bad_demo_job` does not start with `flights_`, so `conftest test`
+# emits a `deny` and CI blocks the deploy step. Rename to `flights_demo_job`
+# (or delete this file) to make the pipeline go green.
+resources:
+  jobs:
+    policy_demo_bad_job:
+      name: bad_demo_job
+
+      tasks:
+        - task_key: noop_task
+          job_cluster_key: job_cluster
+          notebook_task:
+            notebook_path: ../src/flights_main_notebook.py
+            base_parameters:
+              catalog: ${var.catalog}
+              database: ${var.database}
+
+      job_clusters:
+        - job_cluster_key: job_cluster
+          new_cluster: ${var.shared_cluster_config}
