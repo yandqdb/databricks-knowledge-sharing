@@ -1,0 +1,14 @@
+# hive_metastore -> Unity Catalog mapping for the sample fixture.
+# Each UC table is the one registered against the SAME ADLS Gen2 Delta path as
+# its hive source (verified by storage path, not by name).
+
+# Enables the bare-name remap: an unqualified `routes` resolves here.
+default_database: hive_metastore.transit
+
+tables:
+  - hive: hive_metastore.transit.raw_taps
+    uc:   transit_prod.bronze.raw_taps
+  - hive: hive_metastore.transit.routes
+    uc:   transit_prod.bronze.routes
+  # NOTE: hive_metastore.transit.raw_taps_2019_archive is deliberately omitted
+  # so the demo shows the UNMAPPED report path.
