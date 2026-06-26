@@ -1,0 +1,27 @@
+# Sample run-spec for the bundled demo.
+# original  = the metastore-remap sample notebook (pre-migration)
+# migrated  = the same notebook after running metastore-remap + ansi-remediation
+#
+# Produce the migrated copy with the two sibling skills, e.g.:
+#   cd ~/.claude/skills/databricks-metastore-remap/scripts
+#   python remap_refs.py assets/sample_synapse_notebook.py \
+#     --mapping ../assets/sample_mapping.yaml --out /tmp/demo_migrated.py
+#   cd ~/.claude/skills/databricks-ansi-remediation/scripts
+#   python apply_remediation.py /tmp/demo_migrated.py --mode session-flag --write
+
+defaults:
+  workspace_profile: translink-demo
+  compute:
+    type: serverless
+  catalog: translink
+  schema: compass
+
+notebooks:
+  - name: ridership_rollup
+    original: ~/.claude/skills/databricks-metastore-remap/assets/sample_synapse_notebook.py
+    migrated: /tmp/demo_migrated.py
+    workspace_path: /Workspace/translink/migration/demo/ridership_rollup
+    parameters:
+      run_date: "2026-06-01"
+    outputs:
+      - translink.compass.ridership_daily

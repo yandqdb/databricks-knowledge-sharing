@@ -1,0 +1,16 @@
+# Sample Synapse baseline for the demo notebook's output table.
+# Numbers here are illustrative placeholders. Replace with values captured from
+# the real Synapse run before using for an actual parity check.
+
+tolerances:
+  row_count_tol: 0
+  null_rate_tol: 0.0
+
+tables:
+  translink.compass.ridership_daily:
+    row_count: 12000
+    null_rates:
+      rider_id: 0.0
+      tap_ts: 0.0
+      fare_amount: 0.0
+    # checksum intentionally omitted for the demo (row_count + null_rates only)
