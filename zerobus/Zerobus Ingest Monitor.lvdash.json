@@ -1,0 +1,2740 @@
+{
+  "datasets": [
+    {
+      "name": "ds_stream",
+      "displayName": "Zerobus Streams",
+      "queryLines": [
+        "SELECT stream_id, table_name,\n",
+        "  COALESCE(protocol, 'Unknown') AS protocol,\n",
+        "  COALESCE(data_format, 'Unknown') AS data_format,\n",
+        "  opened_time, closed_time, event_time,\n",
+        "  event_time AS commit_time,\n",
+        "  SIZE(errors) AS error_count,\n",
+        "  CASE WHEN opened_time IS NOT NULL THEN stream_id END AS opened_sid,\n",
+        "  CASE WHEN closed_time IS NOT NULL THEN stream_id END AS closed_sid\n",
+        "FROM system.lakeflow.zerobus_stream"
+      ]
+    },
+    {
+      "name": "ds_ingest",
+      "displayName": "Zerobus Ingestion",
+      "queryLines": [
+        "SELECT stream_id, table_name, commit_version, commit_time,\n",
+        "  committed_bytes, committed_records,\n",
+        "  SIZE(errors) AS error_count\n",
+        "FROM system.lakeflow.zerobus_ingest"
+      ]
+    },
+    {
+      "name": "ds_leaderboard",
+      "displayName": "Table Leaderboard",
+      "queryLines": [
+        "WITH agg AS (\n",
+        "  SELECT table_name,\n",
+        "    SUM(committed_records) AS total_records,\n",
+        "    SUM(committed_bytes) AS total_bytes,\n",
+        "    COUNT(DISTINCT stream_id) AS unique_streams,\n",
+        "    SUM(CASE WHEN SIZE(errors) > 0 THEN 1 ELSE 0 END) AS error_commits\n",
+        "  FROM system.lakeflow.zerobus_ingest GROUP BY table_name\n",
+        ")\n",
+        "SELECT a.table_name, COALESCE(_ow.table_owner, 'Unknown') AS owner,\n",
+        "  a.total_records, a.total_bytes, a.unique_streams, a.error_commits\n",
+        "FROM agg a\n",
+        "LEFT JOIN system.information_schema.tables _ow\n",
+        "  ON SPLIT(a.table_name, '[.]')[0] = _ow.table_catalog\n",
+        "  AND SPLIT(a.table_name, '[.]')[1] = _ow.table_schema\n",
+        "  AND SPLIT(a.table_name, '[.]')[2] = _ow.table_name\n",
+        "ORDER BY a.total_bytes DESC"
+      ]
+    },
+    {
+      "name": "ds_recent_errors",
+      "displayName": "Recent Errors",
+      "queryLines": [
+        "SELECT * FROM (\n",
+        "  SELECT 'ingest' AS source, stream_id, table_name,\n",
+        "    commit_time, SIZE(errors) AS error_count\n",
+        "  FROM system.lakeflow.zerobus_ingest\n",
+        "  WHERE SIZE(errors) > 0\n",
+        "  UNION ALL\n",
+        "  SELECT 'stream' AS source, stream_id, table_name,\n",
+        "    event_time AS commit_time, SIZE(errors) AS error_count\n",
+        "  FROM system.lakeflow.zerobus_stream\n",
+        "  WHERE SIZE(errors) > 0 AND table_name IS NOT NULL\n",
+        ") ORDER BY commit_time DESC LIMIT 100"
+      ]
+    },
+    {
+      "name": "ds_top10",
+      "displayName": "Top 10 Tables",
+      "queryLines": [
+        "WITH agg AS (\n",
+        "  SELECT table_name,\n",
+        "    SUM(committed_records) AS total_records,\n",
+        "    SUM(committed_bytes) AS total_bytes,\n",
+        "    COUNT(DISTINCT stream_id) AS unique_streams\n",
+        "  FROM system.lakeflow.zerobus_ingest GROUP BY table_name\n",
+        "  ORDER BY total_bytes DESC LIMIT 10\n",
+        ")\n",
+        "SELECT a.table_name, COALESCE(_ow.table_owner, 'Unknown') AS owner,\n",
+        "  a.total_records, a.total_bytes, a.unique_streams\n",
+        "FROM agg a\n",
+        "LEFT JOIN system.information_schema.tables _ow\n",
+        "  ON SPLIT(a.table_name, '[.]')[0] = _ow.table_catalog\n",
+        "  AND SPLIT(a.table_name, '[.]')[1] = _ow.table_schema\n",
+        "  AND SPLIT(a.table_name, '[.]')[2] = _ow.table_name"
+      ]
+    },
+    {
+      "name": "ds_stream_rates",
+      "displayName": "Stream Throughput Rates",
+      "queryLines": [
+        "SELECT stream_id, table_name,\n",
+        "  DATE_TRUNC('HOUR', commit_time) AS commit_time,\n",
+        "  ROUND(SUM(committed_bytes) / 3600.0) AS bytes_per_sec,\n",
+        "  ROUND(SUM(committed_records) / 3600.0) AS records_per_sec,\n",
+        "  ROUND(SUM(committed_bytes) / NULLIF(SUM(committed_records), 0)) AS avg_record_bytes\n",
+        "FROM system.lakeflow.zerobus_ingest\n",
+        "GROUP BY stream_id, table_name, DATE_TRUNC('HOUR', commit_time)"
+      ]
+    },
+    {
+      "name": "ds_table_rates",
+      "displayName": "Table Throughput Rates",
+      "queryLines": [
+        "SELECT table_name,\n",
+        "  DATE_TRUNC('HOUR', commit_time) AS commit_time,\n",
+        "  ROUND(SUM(committed_bytes) / 3600.0) AS bytes_per_sec\n",
+        "FROM system.lakeflow.zerobus_ingest\n",
+        "GROUP BY table_name, DATE_TRUNC('HOUR', commit_time)"
+      ]
+    },
+    {
+      "name": "ds_stream_lifecycle",
+      "displayName": "Stream Lifecycle",
+      "queryLines": [
+        "SELECT op.stream_id, op.table_name, op.opened_time, cl.closed_time,\n",
+        "  UNIX_TIMESTAMP(cl.closed_time) - UNIX_TIMESTAMP(op.opened_time) AS duration_sec,\n",
+        "  CASE WHEN UNIX_TIMESTAMP(cl.closed_time) - UNIX_TIMESTAMP(op.opened_time) >= 900 THEN 1 ELSE 0 END AS over_900s,\n",
+        "  op.opened_time AS commit_time\n",
+        "FROM (\n",
+        "  SELECT stream_id, table_name, MIN(opened_time) AS opened_time\n",
+        "  FROM system.lakeflow.zerobus_stream WHERE opened_time IS NOT NULL\n",
+        "  GROUP BY stream_id, table_name\n",
+        ") op\n",
+        "INNER JOIN (\n",
+        "  SELECT stream_id, MIN(closed_time) AS closed_time\n",
+        "  FROM system.lakeflow.zerobus_stream WHERE closed_time IS NOT NULL\n",
+        "  GROUP BY stream_id\n",
+        ") cl ON op.stream_id = cl.stream_id"
+      ]
+    },
+    {
+      "name": "ds_concurrent",
+      "displayName": "Concurrent Streams",
+      "queryLines": [
+        "SELECT table_name,\n",
+        "  DATE_TRUNC('MINUTE', event_time) AS commit_time,\n",
+        "  COUNT(DISTINCT stream_id) AS concurrent_streams\n",
+        "FROM system.lakeflow.zerobus_stream\n",
+        "WHERE opened_time IS NOT NULL\n",
+        "GROUP BY table_name, DATE_TRUNC('MINUTE', event_time)"
+      ]
+    },
+    {
+      "name": "ds_owner_agg",
+      "displayName": "Ingestion by Owner",
+      "queryLines": [
+        "WITH agg AS (\n",
+        "  SELECT table_name,\n",
+        "    SUM(committed_bytes) AS total_bytes,\n",
+        "    SUM(committed_records) AS total_records,\n",
+        "    COUNT(*) AS commits\n",
+        "  FROM system.lakeflow.zerobus_ingest GROUP BY table_name\n",
+        ")\n",
+        "SELECT COALESCE(_ow.table_owner, 'Unknown') AS owner,\n",
+        "  SUM(a.total_bytes) AS total_bytes,\n",
+        "  SUM(a.total_records) AS total_records,\n",
+        "  COUNT(DISTINCT a.table_name) AS table_count\n",
+        "FROM agg a\n",
+        "LEFT JOIN system.information_schema.tables _ow\n",
+        "  ON SPLIT(a.table_name, '[.]')[0] = _ow.table_catalog\n",
+        "  AND SPLIT(a.table_name, '[.]')[1] = _ow.table_schema\n",
+        "  AND SPLIT(a.table_name, '[.]')[2] = _ow.table_name\n",
+        "GROUP BY _ow.table_owner ORDER BY total_bytes DESC LIMIT 15"
+      ]
+    },
+    {
+      "name": "ds_stale",
+      "displayName": "Stale Tables",
+      "queryLines": [
+        "WITH agg AS (\n",
+        "  SELECT table_name,\n",
+        "    MAX(commit_time) AS last_commit,\n",
+        "    ROUND((UNIX_TIMESTAMP(CURRENT_TIMESTAMP()) - UNIX_TIMESTAMP(MAX(commit_time))) / 3600, 1) AS hours_since_last,\n",
+        "    SUM(committed_records) AS total_records\n",
+        "  FROM system.lakeflow.zerobus_ingest GROUP BY table_name\n",
+        "  ORDER BY last_commit ASC LIMIT 25\n",
+        ")\n",
+        "SELECT a.table_name, COALESCE(_ow.table_owner, 'Unknown') AS owner,\n",
+        "  a.last_commit, a.hours_since_last, a.total_records\n",
+        "FROM agg a\n",
+        "LEFT JOIN system.information_schema.tables _ow\n",
+        "  ON SPLIT(a.table_name, '[.]')[0] = _ow.table_catalog\n",
+        "  AND SPLIT(a.table_name, '[.]')[1] = _ow.table_schema\n",
+        "  AND SPLIT(a.table_name, '[.]')[2] = _ow.table_name"
+      ]
+    },
+    {
+      "name": "ds_error_by_table",
+      "displayName": "Errors by Table",
+      "queryLines": [
+        "WITH agg AS (\n",
+        "  SELECT table_name,\n",
+        "    SUM(SIZE(errors)) AS total_errors,\n",
+        "    MAX(commit_time) AS last_error\n",
+        "  FROM system.lakeflow.zerobus_ingest\n",
+        "  WHERE SIZE(errors) > 0 GROUP BY table_name\n",
+        ")\n",
+        "SELECT a.table_name, COALESCE(_ow.table_owner, 'Unknown') AS owner,\n",
+        "  a.total_errors, a.last_error\n",
+        "FROM agg a\n",
+        "LEFT JOIN system.information_schema.tables _ow\n",
+        "  ON SPLIT(a.table_name, '[.]')[0] = _ow.table_catalog\n",
+        "  AND SPLIT(a.table_name, '[.]')[1] = _ow.table_schema\n",
+        "  AND SPLIT(a.table_name, '[.]')[2] = _ow.table_name\n",
+        "ORDER BY a.total_errors DESC"
+      ]
+    },
+    {
+      "name": "ds_author",
+      "displayName": "Author",
+      "queryLines": [
+        "SELECT 'chris.grant@databricks.com' AS author"
+      ]
+    },
+    {
+      "name": "ds_billing",
+      "displayName": "Lakeflow Connect Billing",
+      "queryLines": [
+        "SELECT usage_date AS commit_time, sku_name,\n",
+        "  SUM(usage_quantity) AS dbus\n",
+        "FROM system.billing.usage\n",
+        "WHERE billing_origin_product = 'LAKEFLOW_CONNECT'\n",
+        "GROUP BY usage_date, sku_name"
+      ]
+    },
+    {
+      "name": "ds_billing_monthly",
+      "displayName": "Monthly Billing Summary",
+      "queryLines": [
+        "SELECT DATE_TRUNC('MONTH', usage_date) AS month,\n",
+        "  ROUND(SUM(usage_quantity), 0) AS total_dbus,\n",
+        "  sku_name\n",
+        "FROM system.billing.usage\n",
+        "WHERE billing_origin_product = 'LAKEFLOW_CONNECT'\n",
+        "GROUP BY 1, sku_name ORDER BY 1 DESC"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "pg_overview",
+      "displayName": "Ingestion Overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "k_streams",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_stream",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "COUNT(DISTINCT `opened_sid`) - COUNT(DISTINCT `closed_sid`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Active Streams",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Active Streams",
+                "showDescription": true,
+                "description": "Currently open streams (opened minus closed)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "k_records",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "SUM(`committed_records`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Records Ingested",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Records Ingested",
+                "showDescription": true,
+                "description": "Total records committed via Zerobus"
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 0,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "k_bytes",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "SUM(`committed_bytes`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Bytes Ingested",
+                  "format": {
+                    "type": "number-bytes",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Bytes Ingested",
+                "showDescription": true,
+                "description": "Total bytes committed to Delta tables"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 0,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "k_errors",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "SUM(`error_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Total Errors",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total Errors",
+                "showDescription": true,
+                "description": "Sum of all ingestion errors"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 0,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "k_fresh",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "MAX(`commit_time`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Latest Commit",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Latest Commit",
+                "showDescription": true,
+                "description": "Data freshness — most recent commit timestamp"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "t_records",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "t",
+                      "expression": "DATE_TRUNC(\"HOUR\", `commit_time`)"
+                    },
+                    {
+                      "name": "y",
+                      "expression": "SUM(`committed_records`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "area",
+              "encodings": {
+                "x": {
+                  "fieldName": "t",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Time"
+                },
+                "y": {
+                  "fieldName": "y",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Records",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Records Ingested Over Time",
+                "showDescription": true,
+                "description": "Hourly aggregate — use Time Range filter to zoom in"
+              },
+              "mark": {
+                "colors": [
+                  "#00B8D4"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 3,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "t_bytes",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "t",
+                      "expression": "DATE_TRUNC(\"HOUR\", `commit_time`)"
+                    },
+                    {
+                      "name": "y",
+                      "expression": "SUM(`committed_bytes`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "t",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Time"
+                },
+                "y": {
+                  "fieldName": "y",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Bytes",
+                  "format": {
+                    "type": "number-bytes",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Bytes Ingested Over Time",
+                "showDescription": true,
+                "description": "Hourly aggregate"
+              },
+              "mark": {
+                "colors": [
+                  "#2979FF"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 2,
+            "width": 3,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "t_errors",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "t",
+                      "expression": "DATE_TRUNC(\"HOUR\", `commit_time`)"
+                    },
+                    {
+                      "name": "y",
+                      "expression": "SUM(`error_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "t",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Time"
+                },
+                "y": {
+                  "fieldName": "y",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Errors",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Error Timeline",
+                "showDescription": true,
+                "description": "Hourly error count — spikes indicate ingestion problems"
+              },
+              "mark": {
+                "colors": [
+                  "#FF3621"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 3,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "t_commits",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "t",
+                      "expression": "DATE_TRUNC(\"HOUR\", `commit_time`)"
+                    },
+                    {
+                      "name": "y",
+                      "expression": "COUNT(`commit_version`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "area",
+              "encodings": {
+                "x": {
+                  "fieldName": "t",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Time"
+                },
+                "y": {
+                  "fieldName": "y",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Commits",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Commit Rate",
+                "showDescription": true,
+                "description": "Hourly Delta commits — drop with stable records = bigger batches"
+              },
+              "mark": {
+                "colors": [
+                  "#7C4DFF"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 7,
+            "width": 3,
+            "height": 4
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "pg_tables",
+      "displayName": "Tables & Owners",
+      "layout": [
+        {
+          "widget": {
+            "name": "o_by_owner",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_owner_agg",
+                  "fields": [
+                    {
+                      "name": "owner",
+                      "expression": "`owner`"
+                    },
+                    {
+                      "name": "total_bytes",
+                      "expression": "`total_bytes`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "owner",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Owner"
+                },
+                "y": {
+                  "fieldName": "total_bytes",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Bytes Ingested",
+                  "format": {
+                    "type": "number-bytes",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Ingestion by Owner",
+                "showDescription": true,
+                "description": "Top 15 owners by total bytes — who is driving Zerobus usage?"
+              },
+              "interactivity": {
+                "enabled": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "o_top_tables",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_top10",
+                  "fields": [
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "total_bytes",
+                      "expression": "`total_bytes`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "table_name",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Table"
+                },
+                "y": {
+                  "fieldName": "total_bytes",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Bytes",
+                  "format": {
+                    "type": "number-bytes",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Top 10 Tables",
+                "showDescription": true,
+                "description": "Highest volume ingestion targets"
+              },
+              "interactivity": {
+                "enabled": true
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 0,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "o_leaderboard",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_leaderboard",
+                  "fields": [
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "owner",
+                      "expression": "`owner`"
+                    },
+                    {
+                      "name": "total_records",
+                      "expression": "`total_records`"
+                    },
+                    {
+                      "name": "total_bytes",
+                      "expression": "`total_bytes`"
+                    },
+                    {
+                      "name": "unique_streams",
+                      "expression": "`unique_streams`"
+                    },
+                    {
+                      "name": "error_commits",
+                      "expression": "`error_commits`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "table_name",
+                    "title": "Table"
+                  },
+                  {
+                    "fieldName": "owner",
+                    "title": "Owner"
+                  },
+                  {
+                    "fieldName": "total_records",
+                    "title": "Records",
+                    "format": {
+                      "type": "number-plain",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 0
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  },
+                  {
+                    "fieldName": "total_bytes",
+                    "title": "Bytes",
+                    "format": {
+                      "type": "number-bytes",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 0
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  },
+                  {
+                    "fieldName": "unique_streams",
+                    "title": "Streams"
+                  },
+                  {
+                    "fieldName": "error_commits",
+                    "title": "Errors"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Table Leaderboard",
+                "showDescription": true,
+                "description": "All tables ranked by bytes ingested"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "o_errors_tbl",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_error_by_table",
+                  "fields": [
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "owner",
+                      "expression": "`owner`"
+                    },
+                    {
+                      "name": "total_errors",
+                      "expression": "`total_errors`"
+                    },
+                    {
+                      "name": "last_error",
+                      "expression": "`last_error`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "table_name",
+                    "title": "Table"
+                  },
+                  {
+                    "fieldName": "total_errors",
+                    "title": "Errors"
+                  },
+                  {
+                    "fieldName": "last_error",
+                    "title": "Last Error"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Errors by Table",
+                "showDescription": true,
+                "description": "Which tables produce the most ingestion errors?"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 6,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "o_hdr_stale",
+            "multilineTextboxSpec": {
+              "lines": [
+                "**Stale Tables** — ingestion targets that may have gone silent"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "o_stale",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_stale",
+                  "fields": [
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "owner",
+                      "expression": "`owner`"
+                    },
+                    {
+                      "name": "last_commit",
+                      "expression": "`last_commit`"
+                    },
+                    {
+                      "name": "hours_since_last",
+                      "expression": "`hours_since_last`"
+                    },
+                    {
+                      "name": "total_records",
+                      "expression": "`total_records`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "table_name",
+                    "title": "Table"
+                  },
+                  {
+                    "fieldName": "owner",
+                    "title": "Owner"
+                  },
+                  {
+                    "fieldName": "last_commit",
+                    "title": "Last Commit"
+                  },
+                  {
+                    "fieldName": "hours_since_last",
+                    "title": "Hours Stale"
+                  },
+                  {
+                    "fieldName": "total_records",
+                    "title": "Total Records",
+                    "format": {
+                      "type": "number-plain",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 0
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Stalest Tables",
+                "showDescription": true,
+                "description": "Top 25 tables by longest silence — potential dead pipelines"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 6,
+            "height": 5
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "pg_capacity",
+      "displayName": "Capacity & Limits",
+      "layout": [
+        {
+          "widget": {
+            "name": "c_stream_bps",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_stream_rates",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "MAX(`bytes_per_sec`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Peak Stream Throughput",
+                  "format": {
+                    "type": "number-bytes",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Peak Stream Throughput",
+                "showDescription": true,
+                "description": "Limit: 100 MB/s per stream (hourly peak)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "c_stream_rps",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_stream_rates",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "MAX(`records_per_sec`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Peak Record Rate",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Peak Record Rate",
+                "showDescription": true,
+                "description": "Limit: 15,000 records/s per stream (hourly peak)"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 0,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "c_table_bps",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_table_rates",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "MAX(`bytes_per_sec`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Peak Table Throughput",
+                  "format": {
+                    "type": "number-bytes",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Peak Table Throughput",
+                "showDescription": true,
+                "description": "Limit: 10 GB/s per target table"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "c_record_sz",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_stream_rates",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "MAX(`avg_record_bytes`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Max Record Size",
+                  "format": {
+                    "type": "number-bytes",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Max Record Size",
+                "showDescription": true,
+                "description": "Limit: 10 MB per message"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 0,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "c_max_dur",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_stream_lifecycle",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "MAX(`duration_sec`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Max Stream Duration",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Max Stream Duration",
+                "showDescription": true,
+                "description": "Longest observed (active streams exceed 900s idle timeout)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "c_avg_dur",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_stream_lifecycle",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "AVG(`duration_sec`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Avg Stream Duration",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Avg Stream Duration",
+                "showDescription": true,
+                "description": "Most streams run 15-60 min when actively ingesting"
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 2,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "c_over900",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_stream_lifecycle",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "SUM(`over_900s`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Long-lived Streams",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Long-lived Streams",
+                "showDescription": true,
+                "description": "Active > 15 min (normal for active ingestion)"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "c_concurrent",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_concurrent",
+                  "fields": [
+                    {
+                      "name": "v",
+                      "expression": "MAX(`concurrent_streams`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "v",
+                  "displayName": "Peak Concurrent",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Peak Concurrent",
+                "showDescription": true,
+                "description": "Limit: 1,000 streams per pipeline"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 2,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "c_ref_quick",
+            "multilineTextboxSpec": {
+              "lines": [
+                "**Delivery**: at-least-once only | **Schema**: no auto-evolution, 2000 col max | **Tables**: managed Delta only, same region"
+              ]
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "c_rate_detail",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_stream_rates",
+                  "fields": [
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "stream_id",
+                      "expression": "`stream_id`"
+                    },
+                    {
+                      "name": "bytes_per_sec",
+                      "expression": "`bytes_per_sec`"
+                    },
+                    {
+                      "name": "records_per_sec",
+                      "expression": "`records_per_sec`"
+                    },
+                    {
+                      "name": "avg_record_bytes",
+                      "expression": "`avg_record_bytes`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "table_name",
+                    "title": "Table"
+                  },
+                  {
+                    "fieldName": "stream_id",
+                    "title": "Stream"
+                  },
+                  {
+                    "fieldName": "bytes_per_sec",
+                    "title": "Bytes/sec",
+                    "format": {
+                      "type": "number-bytes",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 0
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  },
+                  {
+                    "fieldName": "records_per_sec",
+                    "title": "Records/sec"
+                  },
+                  {
+                    "fieldName": "avg_record_bytes",
+                    "title": "Avg Record Size",
+                    "format": {
+                      "type": "number-bytes",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 0
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Stream Rate Detail",
+                "showDescription": true,
+                "description": "Per-stream per-minute rates — sort to find hotspots approaching limits"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "c_ref_full",
+            "multilineTextboxSpec": {
+              "lines": [
+                "**Latency SLAs** — durability: P50 ≤ 200ms, P95 ≤ 500ms | table materialization: P50 ≤ 5s, P95 ≤ 30s\n",
+                "\n",
+                "**HTTP Limits** — 10K req/s, 10K max cached streams, 60s cache TTL, 30s idle eviction\n",
+                "\n",
+                "**SDK Defaults** — max 50K in-flight records, 5 min flush timeout, 60s server ack timeout, 3 recovery retries\n",
+                "\n",
+                "**Common Gotchas** — HTTP 200 with no data: check grpc-status code 12 | ALL_PRIVILEGES doesn't work: must grant SELECT + MODIFY | Error 1008: firewall/private link issue | Error 18: unsupported Delta feature\n",
+                "\n",
+                "[Full Zerobus limits documentation](https://docs.databricks.com/aws/en/ingestion/zerobus-limits)"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 6,
+            "height": 3
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "pg_billing",
+      "displayName": "Cost & Billing",
+      "layout": [
+        {
+          "widget": {
+            "name": "b_mtd",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_billing",
+                  "fields": [
+                    {
+                      "name": "dbus",
+                      "expression": "SUM(`dbus`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "dbus",
+                  "displayName": "Total DBUs",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Lakeflow Connect DBUs",
+                "showDescription": true,
+                "description": "Total DBU consumption in selected time range"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "b_daily_avg",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_billing_monthly",
+                  "fields": [
+                    {
+                      "name": "avg_dbus",
+                      "expression": "AVG(`total_dbus`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg_dbus",
+                  "displayName": "Avg Monthly DBUs",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Avg Monthly DBUs",
+                "showDescription": true,
+                "description": "Average monthly Lakeflow Connect consumption"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "b_note",
+            "multilineTextboxSpec": {
+              "lines": [
+                "Lakeflow Connect uses **ENTERPRISE_JOBS_SERVERLESS_COMPUTE** and **ENTERPRISE_DLT_ADVANCED_COMPUTE** SKUs. Pricing varies by region and commitment tier."
+              ]
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "b_daily_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_billing",
+                  "fields": [
+                    {
+                      "name": "day",
+                      "expression": "`commit_time`"
+                    },
+                    {
+                      "name": "dbus",
+                      "expression": "SUM(`dbus`)"
+                    },
+                    {
+                      "name": "sku_name",
+                      "expression": "`sku_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "area",
+              "encodings": {
+                "x": {
+                  "fieldName": "day",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Date"
+                },
+                "y": {
+                  "fieldName": "dbus",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "DBUs",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                },
+                "color": {
+                  "fieldName": "sku_name",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "SKU"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Daily DBU Consumption by SKU",
+                "showDescription": true,
+                "description": "Lakeflow Connect serverless compute and DLT advanced compute usage"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "b_monthly_tbl",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_billing_monthly",
+                  "fields": [
+                    {
+                      "name": "month",
+                      "expression": "`month`"
+                    },
+                    {
+                      "name": "sku_name",
+                      "expression": "`sku_name`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "month",
+                    "title": "Month"
+                  },
+                  {
+                    "fieldName": "sku_name",
+                    "title": "SKU"
+                  },
+                  {
+                    "fieldName": "total_dbus",
+                    "title": "DBUs",
+                    "format": {
+                      "type": "number-plain",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 0
+                      },
+                      "hideGroupSeparator": true
+                    }
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Monthly Breakdown",
+                "showDescription": true,
+                "description": "DBU consumption by month and SKU"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 6,
+            "height": 5
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "bd0cde4b",
+      "displayName": "Table Detail",
+      "layout": [
+        {
+          "widget": {
+            "name": "detail_fresh",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "latest",
+                      "expression": "MAX(`commit_time`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "latest",
+                  "displayName": "Latest Commit"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Latest Commit",
+                "showDescription": true,
+                "description": "Data freshness"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "940e5ad0",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "avg_recs",
+                      "expression": "AVG(`committed_records`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg_recs",
+                  "displayName": "Avg Records/Commit",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Avg Records/Commit",
+                "showDescription": true,
+                "description": "Average records per Delta commit"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "24b095a6",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "avg_bytes",
+                      "expression": "AVG(`committed_bytes`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg_bytes",
+                  "displayName": "Avg Bytes/Commit",
+                  "format": {
+                    "type": "number-bytes",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Avg Bytes/Commit",
+                "showDescription": true,
+                "description": "Average bytes per Delta commit"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 1,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "25242e66",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "total",
+                      "expression": "COUNT(`commit_version`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "total",
+                  "displayName": "Total Commits",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total Commits",
+                "showDescription": true,
+                "description": "Distinct Delta commit versions"
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 1,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "862b1b06",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "minute",
+                      "expression": "DATE_TRUNC(\"HOUR\", `commit_time`)"
+                    },
+                    {
+                      "name": "records",
+                      "expression": "SUM(`committed_records`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "minute",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Time"
+                },
+                "y": {
+                  "fieldName": "records",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Records/hr",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "hideGroupSeparator": true
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Records per Hour",
+                "showDescription": true,
+                "description": "Hourly aggregate — use Table filter to drill into a specific table"
+              },
+              "mark": {
+                "colors": [
+                  "#00B8D4"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 12,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "0a12ab1f",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_stream",
+                  "fields": [
+                    {
+                      "name": "minute",
+                      "expression": "DATE_TRUNC(\"HOUR\", `commit_time`)"
+                    },
+                    {
+                      "name": "stream_count",
+                      "expression": "COUNT(DISTINCT `stream_id`)"
+                    },
+                    {
+                      "name": "protocol",
+                      "expression": "`protocol`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "minute",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Time"
+                },
+                "y": {
+                  "fieldName": "stream_count",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Streams"
+                },
+                "color": {
+                  "fieldName": "protocol",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "GRPC",
+                        "color": "#00B8D4"
+                      },
+                      {
+                        "value": "HTTP",
+                        "color": "#FFAB00"
+                      },
+                      {
+                        "value": "Unknown",
+                        "color": "#90A4AE"
+                      }
+                    ]
+                  },
+                  "displayName": "Protocol"
+                },
+                "label": {
+                  "show": false
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Streams by Protocol",
+                "showDescription": true,
+                "description": "gRPC vs HTTP vs Unknown per hour"
+              },
+              "interactivity": {
+                "enabled": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "b434cb63",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_recent_errors",
+                  "fields": [
+                    {
+                      "name": "commit_time",
+                      "expression": "`commit_time`"
+                    },
+                    {
+                      "name": "source",
+                      "expression": "`source`"
+                    },
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "stream_id",
+                      "expression": "`stream_id`"
+                    },
+                    {
+                      "name": "error_count",
+                      "expression": "`error_count`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "commit_time"
+                  },
+                  {
+                    "fieldName": "source"
+                  },
+                  {
+                    "fieldName": "table_name"
+                  },
+                  {
+                    "fieldName": "stream_id"
+                  },
+                  {
+                    "fieldName": "error_count"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Recent Errors",
+                "showDescription": true,
+                "description": "Latest ingestion errors"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 8,
+            "width": 6,
+            "height": 5
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "b8cac719",
+      "displayName": "Global Filters",
+      "layout": [
+        {
+          "widget": {
+            "name": "041f0ee9",
+            "queries": [
+              {
+                "name": "global_ds_ingest_commit_time",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "commit_time",
+                      "expression": "`commit_time`"
+                    },
+                    {
+                      "name": "commit_time_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "commit_time",
+                    "queryName": "global_ds_ingest_commit_time",
+                    "displayName": "Time Range",
+                    "defaultSelection": {
+                      "values": {
+                        "startDate": "now-7d/d",
+                        "endDate": "now/d"
+                      }
+                    }
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Time Range"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "b669c719",
+            "queries": [
+              {
+                "name": "global_ds_leaderboard_owner",
+                "query": {
+                  "datasetName": "ds_leaderboard",
+                  "fields": [
+                    {
+                      "name": "owner",
+                      "expression": "`owner`"
+                    },
+                    {
+                      "name": "owner_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "owner",
+                    "queryName": "global_ds_leaderboard_owner",
+                    "displayName": "Owner"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Owner"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f70c1376",
+            "queries": [
+              {
+                "name": "global_ds_ingest_table_name",
+                "query": {
+                  "datasetName": "ds_ingest",
+                  "fields": [
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "table_name_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "table_name",
+                    "queryName": "global_ds_ingest_table_name",
+                    "displayName": "Table"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Table"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "flt_protocol",
+            "queries": [
+              {
+                "name": "global_ds_stream_protocol",
+                "query": {
+                  "datasetName": "ds_stream",
+                  "fields": [
+                    {
+                      "name": "protocol",
+                      "expression": "`protocol`"
+                    },
+                    {
+                      "name": "protocol_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "protocol",
+                    "queryName": "global_ds_stream_protocol",
+                    "displayName": "Protocol"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Protocol"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "flt_data_format",
+            "queries": [
+              {
+                "name": "global_ds_stream_data_format",
+                "query": {
+                  "datasetName": "ds_stream",
+                  "fields": [
+                    {
+                      "name": "data_format",
+                      "expression": "`data_format`"
+                    },
+                    {
+                      "name": "data_format_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "data_format",
+                    "queryName": "global_ds_stream_data_format",
+                    "displayName": "Data Format"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Data Format"
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "flt_author",
+            "queries": [
+              {
+                "name": "global_author",
+                "query": {
+                  "datasetName": "ds_author",
+                  "fields": [
+                    {
+                      "name": "author",
+                      "expression": "`author`"
+                    },
+                    {
+                      "name": "author_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "author",
+                    "queryName": "global_author",
+                    "displayName": "Author",
+                    "defaultSelection": {
+                      "values": [
+                        "chris.grant@databricks.com"
+                      ]
+                    }
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Author"
+              }
+            }
+          },
+          "position": {
+            "x": 10,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_GLOBAL_FILTERS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}
